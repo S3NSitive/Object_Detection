@@ -11,13 +11,13 @@
 
 # ---------------------- FEATURE EXTRACTION ----------------------
 
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import torchvision
-import cv2
-import matplotlib.pyplot as plt
 
 # Say this is our format of the Neural network
 # 1. A 800x800 three channel image
@@ -25,39 +25,33 @@ import matplotlib.pyplot as plt
 # 3. With labels in integers, where 0 indicates background
 
 image = torch.zeros((1, 3, 800, 800)).float()
-bbox = torch.FloatTensor([[20, 30, 400, 500], [300, 400, 500, 600]])  # [y1, x1, y2, x2]
+bounding_box = torch.FloatTensor([[20, 30, 400, 500], [300, 400, 500, 600]])  # [y1, x1, y2, x2]
 labels = torch.LongTensor([6, 8])
-sub_sample = 32
+sub_sample = 16
 
 # We will use the VGG16 network as our feature extraction module
 # which will act as both the backbone for the RPN and the Fast-RCNN network
 
-dummy_img = torch.zeros((1, 3, 800, 800)).float()
-print(dummy_img)
-
+dummy_image = torch.zeros((1, 3, 800, 800)).float()
 model = torchvision.models.vgg16(pretrained=True)
-fe = list(model.features)
-
-print(fe)
+feature_extractor = list(model.features)
 
 req_features = []
-k = dummy_img.clone()
-print(k.size())
-for i in fe:
+k = dummy_image.clone()
+for i in feature_extractor:
     k = i(k)
-    print(k.size())
-    # if k.size()[2] < 800//16:
-    #     break
+    if k.size()[2] < (800//sub_sample):
+        break
     req_features.append(i)
     out_channels = k.size()[1]
 
 print(len(req_features))  # 30
 print(out_channels)  # 512
 
-faster_rcnn_fe_extractor = nn.Sequential(*req_features)
+faster_rcnn_feature_extractor = nn.Sequential(*req_features)
 
 # Extracting Feature through VGG16
-out_map = faster_rcnn_fe_extractor(image)
+out_map = faster_rcnn_feature_extractor(image)
 print(out_map.size())
 
 # ---------------------- ANCHOR BOXES ----------------------
@@ -71,97 +65,78 @@ print(out_map.size())
 # Each anchor box will have [y1, x1, y2, x2]
 # So at each pixel location of the feature map, an anchor will have the shape (9, 4)
 
-# Initialize anchor boxes with zeros
-ratio = [0.5, 1, 2]
-anchor_scale = [4, 8, 16]
-anchor_base = np.zeros((len(ratio) * len(anchor_scale), 4), dtype=np.float32)
-print(anchor_base)
-
-# Filling the values of the anchor scale
-# center for this base anchor will be at
-
-ctr_y = sub_sample / 2.
-ctr_x = sub_sample / 2.
-print(ctr_y, ctr_x)
-
-# Calculating anchors
-for i in range(len(ratio)):
-    for j in range(len(anchor_scale)):
-        h = sub_sample * anchor_scale[j] * np.sqrt(ratio[i])
-        w = sub_sample * anchor_scale[j] * np.sqrt((1. / ratio[i]))
-
-        index = i * len(anchor_scale) + j
-
-        anchor_base[index, 0] = ctr_y - h / 2.  # y1
-        anchor_base[index, 1] = ctr_x - h / 2.  # x1
-        anchor_base[index, 2] = ctr_y + h / 2.  # y2
-        anchor_base[index, 3] = ctr_x + h / 2.  # x2
-
-print(anchor_base)
-
 # The above are the anchor locations at the first feature map pixel
 # Since we got 9 anchors at 25x25 locations, we will get 25x25x9 = 5625 anchors in total
-
 
 # Now generalizing the above to all of the feature map locations,
 # We first generate centers for eah and every feature map pixel
 
-fe_size = 800 // sub_sample
-ctr_y = np.arange(sub_sample / 2, fe_size * sub_sample, sub_sample)
-ctr_x = np.arange(sub_sample / 2, fe_size * sub_sample, sub_sample)
-print(ctr_y)
-print(len(ctr_y))
+# Initialize anchor boxes with zeros
+anchor_ratio = torch.tensor([0.5, 1, 2]).type(torch.FloatTensor)
+anchor_scale = torch.tensor([8, 16, 32]).type(torch.FloatTensor)
+anchor_base = torch.zeros((len(anchor_ratio) * len(anchor_scale), 4), dtype=torch.float32)
 
-an_cen = np.zeros((800, 800, 3), dtype=np.uint8)
+feature_map_size = 800 // sub_sample
+center_x = torch.arange(sub_sample / 2, feature_map_size * sub_sample, sub_sample)
+center_y = torch.arange(sub_sample / 2, feature_map_size * sub_sample, sub_sample)
+
 idx = 0
-ctr = np.empty([fe_size * fe_size, 2])
-for i in range(fe_size):
-    for j in range(fe_size):
-        cv2.circle(an_cen, (int(ctr_x[i]), int(ctr_y[j])), 2, (0, 255, 255), -1)
-        ctr[idx, 1] = ctr_x[i]
-        ctr[idx, 0] = ctr_y[j]
-        idx += 1
+anchor_center = np.zeros((800, 800, 3), dtype=np.uint8)
+center = torch.empty([feature_map_size * feature_map_size, 2])
+for i in range(feature_map_size):
+    for j in range(feature_map_size):
+        cv2.circle(anchor_center, (int(center_x[i]), int(center_y[j])), 2, (0, 255, 255), -1)
+        # center[idx, 1] = center_x[i]
+        # center[idx, 0] = center_y[j]
+        # idx += 1
 
-print(ctr)
-print(ctr[312])
-plt.figure()
-plt.imshow(an_cen)
+plt.figure(figsize=(10, 10))
+plt.imshow(anchor_center)
 plt.show()
 
 # 25x25x9 array of 4 coordinates of all anchor boxes
-anchors = np.zeros((fe_size * fe_size * len(ratio) * len(anchor_scale), 4))
-index = 0
-for c in ctr:
-    ctr_y, ctr_x = c
-    for i in range(len(ratio)):
-        for j in range(len(anchor_scale)):
-            h = sub_sample * anchor_scale[j] * np.sqrt(ratio[i])
-            w = sub_sample * anchor_scale[j] * np.sqrt(1. / ratio[i])
+x_vec, y_vec = torch.meshgrid(center_x, center_y)
+x_vec = x_vec.flatten()
+y_vec = y_vec.flatten()
 
-            anchors[index, 0] = ctr_y - h / 2.
-            anchors[index, 1] = ctr_x - w / 2.
-            anchors[index, 2] = ctr_y + h / 2.
-            anchors[index, 3] = ctr_x + w / 2.
+h_vec = sub_sample * torch.mm(torch.sqrt(anchor_ratio).view(3, 1), anchor_scale.view(1, 3)).flatten()
+w_vec = sub_sample * torch.mm(torch.sqrt(1./anchor_ratio).view(3, 1), anchor_scale.view(1, 3)).flatten()
+
+
+
+anchors = torch.zeros((feature_map_size * feature_map_size * len(anchor_ratio) * len(anchor_scale), 4))
+index = 0
+for c in center:
+    center_y, center_x = c
+    for i in range(len(anchor_ratio)):
+        for j in range(len(anchor_scale)):
+            h = sub_sample * anchor_scale[j] * torch.sqrt(anchor_ratio[i])
+            w = sub_sample * anchor_scale[j] * torch.sqrt(1. / anchor_ratio[i])
+
+            anchors[index, 0] = center_y - h / 2.
+            anchors[index, 1] = center_x - w / 2.
+            anchors[index, 2] = center_y + h / 2.
+            anchors[index, 3] = center_x + w / 2.
             index += 1
 
-print(anchors.shape)  # (5625, 4)
+print(anchors.shape)  # (22500, 4)
 
 # Example of anchor boxes at (400, 400)
-an_400 = an_cen.copy()
-for i in range(2808, 2817):
-    cv2.rectangle(an_400, (int(anchors[i][1]), int(anchors[i][0])), (int(anchors[i][3]), int(anchors[i][2])),
+an_400 = anchor_center.clone()
+for i in range(11470, 11478):
+    cv2.rectangle(an_400.numpy(), (int(anchors[i][1]), int(anchors[i][0])), (int(anchors[i][3]), int(anchors[i][2])),
                   (255, 255, 255), 2)
 plt.figure()
 plt.imshow(an_400)
 plt.show()
 
 # Visualization of all the anchor boxes covering the input image
-an_all = an_cen.copy()
+an_all = anchor_center.clone()
 for i in range(len(anchors)):
     if int(anchors[i][0]) > 0 and int(anchors[i][1]) > 0 and int(anchors[i][2]) > 0 and int(anchors[i][3]) > 0:
         if int(anchors[i][0]) < 800 and int(anchors[i][1]) < 800 and int(anchors[i][2]) < 800 and int(
                 anchors[i][3]) < 800:
-            cv2.rectangle(an_all, (int(anchors[i][1]), int(anchors[i][0])), (int(anchors[i][3]), int(anchors[i][2])),
+            cv2.rectangle(an_all.numpy(), (int(anchors[i][1]), int(anchors[i][0])), (int(anchors[i][3]), int(anchors[i][2])),
                           (255, 255, 255), 1)
 plt.figure(figsize=(15, 12))
 plt.imshow(an_all)
@@ -180,19 +155,19 @@ plt.show()
 # a) Anchors with IoU less than 0.3 for all ground truth boxes
 # Anchors that are not positive or negative do not contribute to the training objective
 
-bbox = np.asarray([[20, 30, 400, 500], [300, 400, 500, 600]], dtype=np.float32)  # [y1, x1, y2, x2] format
-labels = np.asarray([6, 8], dtype=np.int8)  # 0 represents background
-
+bounding_box = torch.tensor([[20, 30, 400, 500], [300, 400, 500, 600]], dtype=torch.float32)
+labels = torch.tensor([6, 8], dtype=torch.int8)  # 0 represents background
 
 # Let's first find all valid anchor boxes (recall boxes that go beyond the image boundaries are not valid)
-
-index_inside = np.where(
-    (anchors[:, 0] >= 0) &
-    (anchors[:, 1] >= 0) &
-    (anchors[:, 2] <= 800) &
-    (anchors[:, 3] <= 800)
-)[0]
-print(index_inside.shape)  # (2257,)
+index_inside = torch.where(((anchors[:, 0] >= 0) &
+                           (anchors[:, 1] >= 0) &
+                           (anchors[:, 2] <= 800) &
+                           (anchors[:, 3] <= 800)), anchors, anchors)
+index_inside = np.where((anchors[:, 0] >= 0) &
+                           (anchors[:, 1] >= 0) &
+                           (anchors[:, 2] <= 800) &
+                           (anchors[:, 3] <= 800))[0]
+print(index_inside.shape)  # (8940,)
 
 # Creating an empty label array
 label = np.empty((len(index_inside),), dtype=np.int32)
@@ -204,16 +179,15 @@ val_anchors = anchors[index_inside]
 print(val_anchors.shape)  # (2257, 4)
 
 # Now we need to calculate the IoU with the ground truth to label the anchor boxes
-# TODO : use PyTorch and Tensors, GPU to optimize all of these codes
-ious = np.empty((len(val_anchors), len(bbox)), dtype=np.float32)  # iou per ground truth bbox
+ious = np.empty((len(val_anchors), len(bounding_box)), dtype=np.float32)  # iou per ground truth bbox
 ious.fill(0)
-print(bbox)
+print(bounding_box)
 
 for num1, i in enumerate(val_anchors):
     ya1, xa1, ya2, xa2 = i
     anchor_area = (ya2 - ya1) * (xa2 - xa1)
 
-    for num2, j in enumerate(bbox):
+    for num2, j in enumerate(bounding_box):
         yb1, xb1, yb2, xb2 = j
         box_area = (yb2 - yb1) * (xb2 - xb1)
 
@@ -299,14 +273,14 @@ if len(neg_index) > n_neg:
 
 # Assigning locations to anchor boxes
 # We're finding out the location of the ground truth boxes w.r.t to the associated anchor box
-max_iou_bbox = bbox[argmax_ious]  # Finding which bbox was max IoU for each anchor boxes
+max_iou_bbox = bounding_box[argmax_ious]  # Finding which bbox was max IoU for each anchor boxes
 print(max_iou_bbox)
 
 # We change our origin for comaparison (anchor box)
 height = val_anchors[:, 2] - val_anchors[:, 0]
 width = val_anchors[:, 3] - val_anchors[:, 1]
-ctr_y = val_anchors[:, 0] + 0.5 * height
-ctr_x = val_anchors[:, 1] + 0.5 * width
+center_y = val_anchors[:, 0] + 0.5 * height
+center_x = val_anchors[:, 1] + 0.5 * width
 
 # We change the origin for comparison (ground truth box)
 base_height = max_iou_bbox[:, 2] - max_iou_bbox[:, 0]
@@ -321,8 +295,8 @@ width = np.maximum(width, eps)
 
 # Parameterization of FASTER-RCNN
 # Offset in center position, and offset in width and height (anchor <-> ground truth)
-dy = (base_ctr_y - ctr_y) / height
-dx = (base_ctr_x - ctr_x) / width
+dy = (base_ctr_y - center_y) / height
+dx = (base_ctr_x - center_x) / width
 dh = np.log(base_height / height)
 dw = np.log(base_width / width)
 
@@ -434,7 +408,6 @@ anc_width = anchors[:, 3] - anchors[:, 1]
 anc_ctr_y = anchors[:, 0] + 0.5 * anc_height
 anc_ctr_x = anchors[:, 1] + 0.5 * anc_width
 
-
 # Make the tensors into numpy arrays
 pred_anchor_locs_numpy = pred_anchor_locs[0].data.numpy()
 objectness_score_numpy = objectness_score[0].data.numpy()
@@ -445,17 +418,17 @@ dh = pred_anchor_locs_numpy[:, 2::4]
 dw = pred_anchor_locs_numpy[:, 3::4]
 
 # reverse the parameterization
-ctr_y = dy * anc_height[:, np.newaxis] + anc_ctr_y[:, np.newaxis]
-ctr_x = dx * anc_width[:, np.newaxis] + anc_ctr_x[:, np.newaxis]
+center_y = dy * anc_height[:, np.newaxis] + anc_ctr_y[:, np.newaxis]
+center_x = dx * anc_width[:, np.newaxis] + anc_ctr_x[:, np.newaxis]
 h = np.exp(dh) * anc_height[:, np.newaxis]
 w = np.exp(dw) * anc_width[:, np.newaxis]
 
 # Convert to bbox format
 roi = np.zeros(pred_anchor_locs_numpy.shape, dtype=pred_anchor_locs_numpy.dtype)
-roi[:, 0::4] = ctr_y - 0.5 * h
-roi[:, 1::4] = ctr_x - 0.5 * w
-roi[:, 2::4] = ctr_y + 0.5 * h
-roi[:, 3::4] = ctr_x + 0.5 * w
+roi[:, 0::4] = center_y - 0.5 * h
+roi[:, 1::4] = center_x - 0.5 * w
+roi[:, 2::4] = center_y + 0.5 * h
+roi[:, 3::4] = center_x + 0.5 * w
 
 # Clipping the boxes to the image so that it doesn't go beyond the image borders
 img_size = (800, 800)
@@ -467,7 +440,6 @@ hs = roi[:, 2] - roi[:, 0]
 ws = roi[:, 3] - roi[:, 1]
 keep = np.where((hs >= min_size) & (ws >= min_size))[0]
 roi = roi[keep, :]
-
 
 # get score and sort
 score = objectness_score_numpy[keep]
@@ -482,7 +454,6 @@ print(roi.shape)
 print(roi)
 
 # Applying Non Maximal Suppression
-
 # 1. Finding areas of all the boxes
 y1 = roi[:, 0]
 x1 = roi[:, 1]
@@ -520,7 +491,6 @@ print(len(keep))
 keep = keep[:n_train_post_nms]  # while training/testing , use accordingly
 roi = roi[keep]  # the final region proposals
 
-
 # This final region proposal is used as the input to Faster-RCNN to try
 # 1.  Predict the object location w.r.t to the proposed box
 # 2.  Classify the object in the proposal
@@ -547,7 +517,7 @@ ious.fill(0)
 for num1, i in enumerate(roi):
     ya1, xa1, ya2, xa2 = i
     anchor_area = (ya2 - ya1) * (xa2 - xa1)
-    for num2, j in enumerate(bbox):
+    for num2, j in enumerate(bounding_box):
         yb1, xb1, yb2, xb2 = j
         box_area = (yb2- yb1) * (xb2 - xb1)
 
@@ -581,8 +551,7 @@ pos_index = np.where(max_iou >= pos_iou_thresh)[0]
 pos_roi_per_this_image = n_sample * pos_ratio
 pos_roi_per_this_image = int(min(pos_roi_per_this_image, pos_index.size))
 if pos_index.size > 0:
-    pos_index = np.random.choice(
-        pos_index, size=pos_roi_per_this_image, replace=False)
+    pos_index = np.random.choice(pos_index, size=pos_roi_per_this_image, replace=False)
 print(pos_roi_per_this_image)
 print(pos_index)
 
@@ -603,13 +572,13 @@ sample_roi = roi[keep_index]
 print(sample_roi.shape)
 
 # Pick the ground truth objects for these sample rois
-bbox_for_sampled_roi = bbox[gt_assignment[keep_index]]
+bbox_for_sampled_roi = bounding_box[gt_assignment[keep_index]]
 print(bbox_for_sampled_roi.shape)
 
 height = sample_roi[:, 2] - sample_roi[:, 0]
 width = sample_roi[:, 3] - sample_roi[:, 1]
-ctr_y = sample_roi[:, 0] + 0.5 * height
-ctr_x = sample_roi[:, 1] + 0.5 * width
+center_y = sample_roi[:, 0] + 0.5 * height
+center_x = sample_roi[:, 1] + 0.5 * width
 
 base_height = bbox_for_sampled_roi[:, 2] - bbox_for_sampled_roi[:, 0]
 base_width = bbox_for_sampled_roi[:, 3] - bbox_for_sampled_roi[:, 1]
@@ -620,8 +589,8 @@ eps = np.finfo(height.dtype).eps
 height = np.maximum(height, eps)
 width = np.maximum(width, eps)
 
-dy = (base_ctr_y - ctr_y) / height
-dx = (base_ctr_x - ctr_x) / width
+dy = (base_ctr_y - center_y) / height
+dx = (base_ctr_x - center_x) / width
 dh = np.log(base_height / height)
 dw = np.log(base_width / width)
 
